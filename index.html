@@ -74,6 +74,8 @@ footer{padding-top:8px;padding-bottom:40px;color:var(--muted);font-size:.88rem}
 .chat-compose textarea{min-height:76px}
 .chat-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .chat-status{font-size:.85rem;color:var(--muted);min-height:1.3em}
+.chat-proposal{border:1px solid var(--line);border-radius:8px;padding:12px;margin:10px 0;background:var(--bg)}
+.chat-proposal ul{padding-left:20px;margin:8px 0}.chat-proposal .chat-actions{margin-top:8px}
 </style>
 </head>
 <body>
@@ -94,10 +96,11 @@ footer{padding-top:8px;padding-bottom:40px;color:var(--muted);font-size:.88rem}
 
 <section class="card" id="chatCard">
 <h2>Converse com o assistente</h2>
-<p class="note">Conte o que precisa organizar. Nesta primeira etapa, o assistente conversa e sugere; ele ainda não altera sua agenda.</p>
+<p class="note">Peça para adicionar horários à sua agenda. A IA prepara uma proposta e você confirma antes de aplicar. Os compromissos atuais são enviados à IA para verificar conflitos.</p>
 <div id="chatLog" class="chat-log" role="log" aria-live="polite" aria-label="Conversa com o assistente">
 <div class="chat-bubble assistant">Olá! Posso ajudar você a pensar na sua rotina, nos seus estudos e nos horários disponíveis. O que você gostaria de organizar?</div>
 </div>
+<div id="chatProposal"></div>
 <div class="chat-compose">
 <label for="chatInput">Sua mensagem</label>
 <textarea id="chatInput" placeholder="Ex.: Tenho prova na sexta e preciso organizar meus estudos..."></textarea>
@@ -152,7 +155,7 @@ footer{padding-top:8px;padding-bottom:40px;color:var(--muted);font-size:.88rem}
 </div>
 </div>
 </main>
-<footer>As sugestões são um ponto de partida: a decisão final é sempre sua. Seus compromissos ficam salvos apenas neste navegador, no seu aparelho, e não são enviados a ninguém. Use “Limpar tudo” para apagar.</footer>
+<footer>Seus compromissos ficam salvos neste navegador. Quando você conversa com a IA, a agenda atual é enviada ao Cloudflare para ajudar a analisar horários e preparar sugestões. Nenhuma alteração é aplicada sem sua confirmação. Use “Limpar tudo” para apagar a agenda local.</footer>
 
 <script>
 const DIAS=['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
@@ -161,29 +164,55 @@ let uid=1;
 const $=id=>document.getElementById(id);
 const toMin=t=>{const [h,m]=t.split(':').map(Number);return h*60+m};
 const fmt=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
-const nm=i=>i.nome||(i.tipo==='aula'?'aula':'trabalho');
-const label=i=>(i.nome||(i.tipo==='aula'?'Aula':'Trabalho'));
+const nm=i=>i.nome||(i.tipo==='aula'?'aula':i.tipo==='estudo'?'estudo':'trabalho');
+const label=i=>(i.nome||(i.tipo==='aula'?'Aula':i.tipo==='estudo'?'Estudo':'Trabalho'));
 
 function compute(){
-  const issues=[],bad=new Set(),days=[],c=state.commute;
+  const issues=[],days=[],c=state.commute;
   for(let d=0;d<7;d++){
-    const fx=state.items.filter(i=>i.dias.includes(d)).map(i=>({...i,s:toMin(i.inicio),e:toMin(i.fim)})).filter(i=>i.e>i.s).sort((a,b)=>a.s-b.s);
+    const fx=state.items.filter(i=>i.dias.includes(d))
+      .map(i=>({...i,s:toMin(i.inicio),e:toMin(i.fim)}))
+      .filter(i=>i.e>i.s).sort((a,b)=>a.s-b.s);
     const blocks=fx.map(i=>({kind:i.tipo,label:label(i),s:i.s,e:i.e,bad:false,ref:i}));
     const busy=fx.map(i=>[i.s,i.e]);
     const mark=(...refs)=>refs.forEach(r=>blocks.forEach(b=>{if(b.ref===r)b.bad=true}));
+
+    // Detecta sobreposição entre quaisquer compromissos, inclusive estudos adicionados pela IA.
     fx.forEach((a,k)=>{
-      const b=fx[k+1];
-      if(k===0&&c){blocks.push({kind:'desl',label:'Ida',s:Math.max(0,a.s-c),e:a.s});busy.push([a.s-c,a.s]);}
-      if(b){
-        if(b.s<a.e){issues.push(`${DIAS[d]}: ${nm(a)} e ${nm(b)} acontecem ao mesmo tempo (${fmt(b.s)} a ${fmt(Math.min(a.e,b.e))}).`);mark(a,b);}
-        else if(a.tipo!==b.tipo&&c){
-          if(b.s-a.e<c){issues.push(`${DIAS[d]}: entre ${nm(a)} (termina às ${fmt(a.e)}) e ${nm(b)} (começa às ${fmt(b.s)}) há ${b.s-a.e} min, mas o deslocamento leva ${c} min. Considere sair mais cedo ou trocar o horário de um dos dois.`);mark(a,b);}
-          else{blocks.push({kind:'desl',label:'Trajeto',s:a.e,e:a.e+c});busy.push([a.e,a.e+c]);}
-        }
-      }else if(c){blocks.push({kind:'desl',label:'Volta',s:a.e,e:a.e+c});busy.push([a.e,a.e+c]);}
+      for(let j=k+1;j<fx.length&&fx[j].s<a.e;j++){
+        const b=fx[j];
+        issues.push(`${DIAS[d]}: ${nm(a)} e ${nm(b)} acontecem ao mesmo tempo (${fmt(Math.max(a.s,b.s))} a ${fmt(Math.min(a.e,b.e))}).`);
+        mark(a,b);
+      }
     });
-    days.push({blocks,busy,study:0});
+
+    // Deslocamento só é calculado entre compromissos presenciais (aula/trabalho).
+    const external=fx.filter(i=>i.tipo==='aula'||i.tipo==='trabalho');
+    if(external.length&&c){
+      const first=external[0];
+      blocks.push({kind:'desl',label:'Ida',s:Math.max(0,first.s-c),e:first.s});
+      busy.push([Math.max(0,first.s-c),first.s]);
+      for(let k=0;k<external.length-1;k++){
+        const a=external[k],b=external[k+1];
+        if(b.s>=a.e){
+          if(a.tipo!==b.tipo){
+            if(b.s-a.e<c){
+              issues.push(`${DIAS[d]}: entre ${nm(a)} (termina às ${fmt(a.e)}) e ${nm(b)} (começa às ${fmt(b.s)}) há ${b.s-a.e} min, mas o deslocamento leva ${c} min.`);
+              mark(a,b);
+            }else{
+              blocks.push({kind:'desl',label:'Trajeto',s:a.e,e:a.e+c});
+              busy.push([a.e,a.e+c]);
+            }
+          }
+        }
+      }
+      const last=external[external.length-1];
+      blocks.push({kind:'desl',label:'Volta',s:last.e,e:last.e+c});
+      busy.push([last.e,last.e+c]);
+    }
+    days.push({blocks,busy,study:fx.filter(i=>i.tipo==='estudo').reduce((sum,i)=>sum+i.e-i.s,0)});
   }
+
   const L=state.sess,P={any:[420,1320],manha:[420,720],tarde:[720,1080],noite:[1080,1320]}[state.period];
   const n=Math.floor(state.hours*60/L);let placed=0;
   const slot=(d,r)=>{
@@ -201,10 +230,11 @@ function compute(){
       if(best)break;
     }
     if(!best)break;
-    days[best.d].blocks.push({kind:'estudo',label:'Estudo',s:best.s,e:best.s+L});
+    days[best.d].blocks.push({kind:'estudo',label:'Estudo sugerido',s:best.s,e:best.s+L});
     days[best.d].busy.push([best.s,best.s+L]);days[best.d].study+=L;placed++;
   }
-  return {days,issues,placed,n,L};
+  const studyMinutes=days.reduce((sum,d)=>sum+d.blocks.filter(b=>b.kind==='estudo').reduce((s,b)=>s+b.e-b.s,0),0);
+  return {days,issues,placed,n,L,studyMinutes};
 }
 
 // salvamento local: os dados ficam só neste navegador
@@ -215,7 +245,7 @@ function load(){
     const raw=localStorage.getItem(KEY);if(!raw)return;
     const s=(JSON.parse(raw)||{}).state;if(!s)return;
     const hm=/^\d{2}:\d{2}$/;
-    if(Array.isArray(s.items))state.items=s.items.filter(i=>i&&(i.tipo==='aula'||i.tipo==='trabalho')&&Array.isArray(i.dias)&&hm.test(i.inicio)&&hm.test(i.fim)).map(i=>({id:+i.id||0,tipo:i.tipo,nome:String(i.nome||'').slice(0,40),dias:i.dias.filter(d=>d>=0&&d<=6),inicio:i.inicio,fim:i.fim}));
+    if(Array.isArray(s.items))state.items=s.items.filter(i=>i&&(i.tipo==='aula'||i.tipo==='trabalho'||i.tipo==='estudo')&&Array.isArray(i.dias)&&hm.test(i.inicio)&&hm.test(i.fim)).map(i=>({id:+i.id||0,tipo:i.tipo,nome:String(i.nome||'').slice(0,40),dias:i.dias.filter(d=>d>=0&&d<=6),inicio:i.inicio,fim:i.fim}));
     ['commute','hours'].forEach(k=>{if(typeof s[k]==='number'&&isFinite(s[k]))state[k]=s[k];});
     if([45,60,90].includes(s.sess))state.sess=s.sess;
     if(['any','manha','tarde','noite'].includes(s.period))state.period=s.period;
@@ -232,7 +262,7 @@ function render(){
   state.items.forEach(i=>{
     const li=document.createElement('li');
     const t=document.createElement('span');
-    const dot=document.createElement('i');dot.className='tag';dot.style.background=i.tipo==='aula'?'var(--aula)':'var(--work)';
+    const dot=document.createElement('i');dot.className='tag';dot.style.background=i.tipo==='aula'?'var(--aula)':i.tipo==='estudo'?'var(--study)':'var(--work)';
     t.append(dot,`${label(i)} · ${i.dias.map(d=>DIAS[d]).join(', ')} · ${i.inicio}–${i.fim}`);
     const b=document.createElement('button');b.type='button';b.className='ghost';b.textContent='Remover';b.setAttribute('aria-label','Remover '+label(i));
     b.onclick=()=>{state.items=state.items.filter(x=>x!==i);render();};
@@ -242,10 +272,10 @@ function render(){
   if(r.issues.length){al.className='alerts';const h=document.createElement('p');h.innerHTML='<strong></strong>';h.firstChild.textContent=r.issues.length===1?'Encontrei 1 conflito na sua semana:':`Encontrei ${r.issues.length} conflitos na sua semana:`;al.append(h);r.issues.forEach(t=>{const p=document.createElement('p');p.textContent=t;al.append(p)});}
   else if(state.items.length){al.className='alerts ok';const p=document.createElement('p');p.textContent='Nenhum conflito de horário ou de deslocamento encontrado.';al.append(p);}
   else al.className='';
-  const hrs=r.placed*r.L/60;
+  const hrs=r.studyMinutes/60;
   $('sum').innerHTML='';
   const s=document.createElement('strong');s.textContent=`${hrs.toLocaleString('pt-BR')} h de estudo alocadas`;
-  const o=document.createElement('span');o.textContent=r.placed<r.n?`Faltaram ${((r.n-r.placed)*r.L/60).toLocaleString('pt-BR')} h: não há espaço livre suficiente com essas regras. Tente sessões menores, outro período ou menos horas.`:`Meta de ${state.hours} h por semana atendida.`;
+  const o=document.createElement('span');o.textContent=hrs<state.hours?`Faltam ${(state.hours-hrs).toLocaleString('pt-BR')} h para a meta de ${state.hours} h por semana.`:`Meta de ${state.hours} h por semana atendida.`;
   $('sum').append(s,o);
   drawGrid(r);
   save();
@@ -363,34 +393,94 @@ $('aiBtn').onclick=()=>{
   m.style.color='var(--muted)';
   m.textContent='Entendi '+r.items.length+' compromisso(s).'+(r.miss.length?' Não entendi: "'+r.miss.join('"; "')+'". Adicione manualmente abaixo.':' Confira na lista.');
 };
-// Chat com IA via Cloudflare Worker. O histórico fica apenas em memória nesta aba.
+// Chat com IA: a agenda é enviada para análise, mas só muda após confirmação.
 const CHAT_API='https://cabe-na-semana-chat.fjchagasf.workers.dev/chat';
 const chatHistory=[];
+let pendingProposal=null;
+
 function addChatBubble(role,text){
   const el=document.createElement('div');el.className='chat-bubble '+role;el.textContent=text;
   $('chatLog').append(el);$('chatLog').scrollTop=$('chatLog').scrollHeight;
+}
+function clearProposal(){pendingProposal=null;$('chatProposal').innerHTML='';}
+function showProposal(proposal){
+  clearProposal();
+  if(!proposal||!Array.isArray(proposal.items)||!proposal.items.length)return;
+  pendingProposal=proposal;
+  const box=document.createElement('div');box.className='chat-proposal';
+  const heading=document.createElement('strong');heading.textContent='Prévia dos horários sugeridos';box.append(heading);
+  const list=document.createElement('ul');
+  proposal.items.forEach(item=>{
+    const li=document.createElement('li');
+    const type=item.tipo==='aula'?'Aula':item.tipo==='trabalho'?'Trabalho':'Estudo';
+    li.textContent=`${type}: ${item.nome} — ${item.dias.map(d=>DIAS[d]).join(', ')} · ${item.inicio} às ${item.fim}`;
+    list.append(li);
+  });
+  box.append(list);
+  const note=document.createElement('p');note.className='note';note.textContent='Confira os horários. Ao confirmar, eles serão adicionados à sua agenda e o gráfico será atualizado.';
+  box.append(note);
+  const actions=document.createElement('div');actions.className='chat-actions';
+  const yes=document.createElement('button');yes.type='button';yes.textContent='Confirmar e adicionar';
+  yes.addEventListener('click',confirmProposal);
+  const no=document.createElement('button');no.type='button';no.className='ghost';no.textContent='Cancelar';
+  no.addEventListener('click',()=>{clearProposal();addChatBubble('assistant','Tudo bem, não alterei sua agenda.');});
+  actions.append(yes,no);box.append(actions);$('chatProposal').append(box);
+}
+function confirmProposal(){
+  if(!pendingProposal)return;
+  const items=pendingProposal.items;
+  for(const item of items){
+    if(!['aula','trabalho','estudo'].includes(item.tipo)||
+       !Array.isArray(item.dias)||!item.dias.length||
+       !item.dias.every(d=>Number.isInteger(d)&&d>=0&&d<=6)||
+       !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(item.inicio)||
+       !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(item.fim)||
+       toMin(item.fim)<=toMin(item.inicio)){
+      $('chatStatus').textContent='A proposta contém um horário inválido e não foi aplicada.';clearProposal();return;
+    }
+  }
+  items.forEach(item=>state.items.push({
+    id:uid++,tipo:item.tipo,nome:String(item.nome||'').slice(0,60),
+    dias:[...new Set(item.dias)],inicio:item.inicio,fim:item.fim
+  }));
+  clearProposal();render();
+  addChatBubble('assistant','Pronto! Adicionei os horários à sua agenda. O gráfico e os cálculos foram atualizados. Confira também os avisos de conflito.');
+  $('chatStatus').textContent='Agenda atualizada.';
 }
 async function sendChat(){
   const input=$('chatInput'),status=$('chatStatus'),button=$('chatSend'),message=input.value.trim();
   if(!message){status.textContent='Digite uma mensagem antes de enviar.';return;}
   if(message.length>1500){status.textContent='Sua mensagem é muito longa. Tente resumir um pouco.';return;}
+  clearProposal();
   addChatBubble('user',message);chatHistory.push({role:'user',content:message});
-  input.value='';status.textContent='A assistente está pensando...';button.disabled=true;
-  const recent=chatHistory.slice(-8);
-  const context=recent.map(m=>(m.role==='user'?'Usuário: ':'Assistente: ')+m.content).join('\n\n');
+  input.value='';status.textContent='A assistente está analisando sua agenda...';button.disabled=true;
   try{
-    const response=await fetch(CHAT_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:context.slice(-1900)})});
+    const response=await fetch(CHAT_API,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        message,
+        history:chatHistory.slice(-8),
+        agenda:state.items.map(i=>({tipo:i.tipo,nome:i.nome,dias:i.dias,inicio:i.inicio,fim:i.fim})),
+        settings:{commute:state.commute,hours:state.hours,sess:state.sess,period:state.period}
+      })
+    });
     const data=await response.json();
     if(!response.ok)throw new Error(data.error||'Falha ao conversar com a assistente.');
     if(typeof data.reply!=='string'||!data.reply.trim())throw new Error('A assistente não retornou uma resposta válida.');
-    chatHistory.push({role:'assistant',content:data.reply});addChatBubble('assistant',data.reply);status.textContent='';
+    chatHistory.push({role:'assistant',content:data.reply});
+    addChatBubble('assistant',data.reply);
+    showProposal(data.proposal);
+    status.textContent=data.proposal?'Revise a proposta antes de confirmar.':'';
   }catch(error){status.textContent='Não foi possível enviar: '+error.message;}
   finally{button.disabled=false;input.focus();}
 }
 $('chatSend').addEventListener('click',sendChat);
 $('chatInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();sendChat();}});
-$('chatClear').addEventListener('click',()=>{chatHistory.length=0;$('chatLog').innerHTML='';addChatBubble('assistant','Conversa limpa! O que você gostaria de organizar?');$('chatStatus').textContent='';$('chatInput').focus();});
-
+$('chatClear').addEventListener('click',()=>{
+  chatHistory.length=0;clearProposal();$('chatLog').innerHTML='';
+  addChatBubble('assistant','Conversa limpa! O que você gostaria de organizar?');
+  $('chatStatus').textContent='';$('chatInput').focus();
+});
 load();sync();render();
 </script>
 </body>
