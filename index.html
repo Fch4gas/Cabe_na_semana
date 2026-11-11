@@ -466,6 +466,7 @@ async function sendChat(){
     });
     const data=await response.json();
     console.log("RESPOSTA COMPLETA DA IA:", data);
+    console.log("ITENS DA PROPOSTA:", JSON.stringify(data.proposal, null, 2));
     if(!response.ok)throw new Error(data.error||'Falha ao conversar com a assistente.');
     if(typeof data.reply!=='string'||!data.reply.trim())throw new Error('A assistente não retornou uma resposta válida.');
     chatHistory.push({role:'assistant',content:data.reply});
