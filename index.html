@@ -64,6 +64,16 @@ ul.items button{margin:0;padding:3px 9px;font-weight:400}
 .b.bad{outline:2px solid var(--bad);outline-offset:-1px}
 #advice{white-space:pre-wrap;margin-top:12px}
 footer{padding-top:8px;padding-bottom:40px;color:var(--muted);font-size:.88rem}
+
+/* Chat com IA */
+.chat-log{display:flex;flex-direction:column;gap:10px;max-height:360px;overflow:auto;padding:4px 2px;margin:12px 0}
+.chat-bubble{max-width:92%;padding:10px 12px;border-radius:10px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:.94rem}
+.chat-bubble.user{align-self:flex-end;background:var(--aula);color:var(--on-aula)}
+.chat-bubble.assistant{align-self:flex-start;background:var(--soft);color:var(--ink)}
+.chat-compose{display:grid;gap:8px}
+.chat-compose textarea{min-height:76px}
+.chat-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.chat-status{font-size:.85rem;color:var(--muted);min-height:1.3em}
 </style>
 </head>
 <body>
@@ -80,6 +90,23 @@ footer{padding-top:8px;padding-bottom:40px;color:var(--muted);font-size:.88rem}
 <button id="aiBtn" type="button">Preencher a partir do texto</button>
 <div class="msg" id="aiMsg" role="status"></div>
 <p class="note">Escreva dias e horários de forma simples, uma ideia por frase. Isso substitui os compromissos abaixo, então confira o resultado.</p>
+</section>
+
+<section class="card" id="chatCard">
+<h2>Converse com o assistente</h2>
+<p class="note">Conte o que precisa organizar. Nesta primeira etapa, o assistente conversa e sugere; ele ainda não altera sua agenda.</p>
+<div id="chatLog" class="chat-log" role="log" aria-live="polite" aria-label="Conversa com o assistente">
+<div class="chat-bubble assistant">Olá! Posso ajudar você a pensar na sua rotina, nos seus estudos e nos horários disponíveis. O que você gostaria de organizar?</div>
+</div>
+<div class="chat-compose">
+<label for="chatInput">Sua mensagem</label>
+<textarea id="chatInput" placeholder="Ex.: Tenho prova na sexta e preciso organizar meus estudos..."></textarea>
+<div class="chat-actions">
+<button type="button" id="chatSend">Enviar mensagem</button>
+<button type="button" class="ghost" id="chatClear">Limpar conversa</button>
+</div>
+<div id="chatStatus" class="chat-status" role="status"></div>
+</div>
 </section>
 
 <section class="card">
@@ -336,6 +363,34 @@ $('aiBtn').onclick=()=>{
   m.style.color='var(--muted)';
   m.textContent='Entendi '+r.items.length+' compromisso(s).'+(r.miss.length?' Não entendi: "'+r.miss.join('"; "')+'". Adicione manualmente abaixo.':' Confira na lista.');
 };
+// Chat com IA via Cloudflare Worker. O histórico fica apenas em memória nesta aba.
+const CHAT_API='https://cabe-na-semana-chat.fjchagasf.workers.dev/chat';
+const chatHistory=[];
+function addChatBubble(role,text){
+  const el=document.createElement('div');el.className='chat-bubble '+role;el.textContent=text;
+  $('chatLog').append(el);$('chatLog').scrollTop=$('chatLog').scrollHeight;
+}
+async function sendChat(){
+  const input=$('chatInput'),status=$('chatStatus'),button=$('chatSend'),message=input.value.trim();
+  if(!message){status.textContent='Digite uma mensagem antes de enviar.';return;}
+  if(message.length>1500){status.textContent='Sua mensagem é muito longa. Tente resumir um pouco.';return;}
+  addChatBubble('user',message);chatHistory.push({role:'user',content:message});
+  input.value='';status.textContent='A assistente está pensando...';button.disabled=true;
+  const recent=chatHistory.slice(-8);
+  const context=recent.map(m=>(m.role==='user'?'Usuário: ':'Assistente: ')+m.content).join('\n\n');
+  try{
+    const response=await fetch(CHAT_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:context.slice(-1900)})});
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.error||'Falha ao conversar com a assistente.');
+    if(typeof data.reply!=='string'||!data.reply.trim())throw new Error('A assistente não retornou uma resposta válida.');
+    chatHistory.push({role:'assistant',content:data.reply});addChatBubble('assistant',data.reply);status.textContent='';
+  }catch(error){status.textContent='Não foi possível enviar: '+error.message;}
+  finally{button.disabled=false;input.focus();}
+}
+$('chatSend').addEventListener('click',sendChat);
+$('chatInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();sendChat();}});
+$('chatClear').addEventListener('click',()=>{chatHistory.length=0;$('chatLog').innerHTML='';addChatBubble('assistant','Conversa limpa! O que você gostaria de organizar?');$('chatStatus').textContent='';$('chatInput').focus();});
+
 load();sync();render();
 </script>
 </body>
